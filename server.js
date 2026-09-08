@@ -4,7 +4,6 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const GROUPME_ACCESS_TOKEN = process.env.GROUPME_ACCESS_TOKEN;
 
 // Store the current roll call in memory
 let rollCall = {
@@ -142,13 +141,10 @@ async function sendMessage(text) {
       }
     );
 
-    if (!response.ok) {
-      console.error(
-        "GroupMe API error:",
-        response.status,
-        await response.text()
-      );
-    }
+    const result = await response.text();
+
+    console.log("GroupMe response:", response.status, result);
+
   } catch (error) {
     console.error("Error sending GroupMe message:", error);
   }
