@@ -5,12 +5,11 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Store the current roll call in memory
+// Current roll call
 let rollCall = {
   active: false,
-  in: [],
-  out: [],
-  maybe: []
+  dateTime: "",
+  responses: {}
 };
 
 // Home page
@@ -34,97 +33,154 @@ app.post("/callback", async (req, res) => {
 
   console.log(`Message from ${name}: ${text}`);
 
-  // Start a roll call
-  if (text.toLowerCase() === "!rollcall") {
+  // Ignore messages sent by the bot itself
+  if (message.sender_type === "bot") {
+    return;
+  }
+
+  // ==============================
+  // START ROLL CALL
+  // ==============================
+
+  if (text.toLowerCase().startsWith("!rollcall")) {
+    const dateTime = text.substring(9).trim();
+
+    if (!dateTime) {
+      await sendMessage(
+        "⚠️ Please specify a date and time.\n\n" +
+        "Example:\n" +
+        "!rollcall September 15 at 7:00 PM"
+      );
+      return;
+    }
+
     rollCall = {
       active: true,
-      in: [],
-      out: [],
-      maybe: []
+      dateTime: dateTime,
+      responses: {}
     };
 
     await sendMessage(
-      "🥎 ROLL CALL IS OPEN!\n\n" +
-      "Are you playing tonight?\n\n" +
-      "Reply with:\n" +
-      "IN — I'm playing\n" +
-      "OUT — Can't make it\n" +
-      "MAYBE — Not sure yet"
+      `🥎 ROLL CALL OPEN\n\n` +
+      `📅 ${dateTime}\n\n` +
+      `Are you playing?\n\n` +
+      `Reply:\n` +
+      `🟢 IN — I'm playing\n` +
+      `🔴 OUT — Can't make it\n` +
+      `🟡 MAYBE — Not sure yet\n\n` +
+      `Use !attendance to see the current responses.`
     );
 
     return;
   }
 
-  // Ignore attendance responses if roll call isn't active
-  if (!rollCall.active) {
+  // ==============================
+  // ATTENDANCE RESPONSES
+  // ==============================
+
+  if (rollCall.active) {
+    const response = text.toLowerCase();
+
+    if (
+      response === "in" ||
+      response === "out" ||
+      response === "maybe"
+    ) {
+      rollCall.responses[name] = response;
+
+      let confirmation;
+
+      if (response === "in") {
+        confirmation = `🟢 ${name} is IN!`;
+      } else if (response === "out") {
+        confirmation = `🔴 ${name} is OUT.`;
+      } else {
+        confirmation = `🟡 ${name} is MAYBE.`;
+      }
+
+      await sendMessage(confirmation);
+      return;
+    }
+  }
+
+  // ==============================
+  // SHOW ATTENDANCE
+  // ==============================
+
+  if (text.toLowerCase() === "!attendance") {
+    await sendAttendance();
     return;
   }
 
-  const response = text.toLowerCase();
+  // ==============================
+  // CLOSE ROLL CALL
+  // ==============================
 
-  if (response === "in") {
-    addPlayer(name, "in");
-    await sendMessage(`✅ ${name} is IN!`);
-  }
+  if (text.toLowerCase() === "!close") {
+    if (!rollCall.active) {
+      await sendMessage("⚠️ There is no active roll call.");
+      return;
+    }
 
-  else if (response === "out") {
-    addPlayer(name, "out");
-    await sendMessage(`❌ ${name} is OUT.`);
-  }
-
-  else if (response === "maybe") {
-    addPlayer(name, "maybe");
-    await sendMessage(`🤔 ${name} is MAYBE.`);
-  }
-
-  // Show attendance
-  else if (response === "!attendance") {
-    await sendAttendance();
-  }
-
-  // Close roll call
-  else if (response === "!close") {
     rollCall.active = false;
 
     await sendAttendance("🔒 ROLL CALL CLOSED");
+
+    return;
   }
 });
 
-// Add/update a player
-function addPlayer(name, status) {
-  // Remove player from every list first
-  rollCall.in = rollCall.in.filter(player => player !== name);
-  rollCall.out = rollCall.out.filter(player => player !== name);
-  rollCall.maybe = rollCall.maybe.filter(player => player !== name);
+// =====================================
+// SEND ATTENDANCE REPORT
+// =====================================
 
-  // Add them to their new status
-  rollCall[status].push(name);
-}
-
-// Send attendance list
 async function sendAttendance(header = "📋 CURRENT ATTENDANCE") {
-  const inList = rollCall.in.length
-    ? rollCall.in.map((name, i) => `${i + 1}. ${name}`).join("\n")
-    : "None";
+  if (!rollCall.dateTime) {
+    await sendMessage("⚠️ There is no active roll call.");
+    return;
+  }
 
-  const outList = rollCall.out.length
-    ? rollCall.out.map((name, i) => `${i + 1}. ${name}`).join("\n")
-    : "None";
+  const inList = [];
+  const outList = [];
+  const maybeList = [];
 
-  const maybeList = rollCall.maybe.length
-    ? rollCall.maybe.map((name, i) => `${i + 1}. ${name}`).join("\n")
-    : "None";
+  for (const [name, response] of Object.entries(rollCall.responses)) {
+    if (response === "in") {
+      inList.push(name);
+    } else if (response === "out") {
+      outList.push(name);
+    } else if (response === "maybe") {
+      maybeList.push(name);
+    }
+  }
+
+  const formatList = (list) => {
+    if (list.length === 0) {
+      return "None";
+    }
+
+    return list
+      .map((name, index) => `${index + 1}. ${name}`)
+      .join("\n");
+  };
 
   const message =
     `${header}\n\n` +
-    `🟢 IN (${rollCall.in.length})\n${inList}\n\n` +
-    `🔴 OUT (${rollCall.out.length})\n${outList}\n\n` +
-    `🟡 MAYBE (${rollCall.maybe.length})\n${maybeList}`;
+    `📅 ${rollCall.dateTime}\n\n` +
+    `🟢 IN (${inList.length})\n` +
+    `${formatList(inList)}\n\n` +
+    `🔴 OUT (${outList.length})\n` +
+    `${formatList(outList)}\n\n` +
+    `🟡 MAYBE (${maybeList.length})\n` +
+    `${formatList(maybeList)}`;
 
   await sendMessage(message);
 }
 
-// Send message back to GroupMe
+// =====================================
+// SEND MESSAGE TO GROUPME
+// =====================================
+
 async function sendMessage(text) {
   try {
     const response = await fetch(
@@ -143,12 +199,17 @@ async function sendMessage(text) {
 
     const result = await response.text();
 
+    console.log("Bot ID being used:", process.env.GROUPME_BOT_ID);
     console.log("GroupMe response:", response.status, result);
 
   } catch (error) {
     console.error("Error sending GroupMe message:", error);
   }
 }
+
+// =====================================
+// START SERVER
+// =====================================
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
