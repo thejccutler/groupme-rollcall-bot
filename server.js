@@ -12,7 +12,8 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN
 });
 
-// Redis key for the softball group's roll call
+// IMPORTANT:
+// This is the production bot's Redis key.
 const ROLL_CALL_KEY = "groupme:rollcall";
 
 // Home page
@@ -34,6 +35,7 @@ app.post("/callback", async (req, res) => {
 
     const text = message.text.trim();
     const name = message.name || "Unknown";
+    const groupId = message.group_id;
 
     console.log(`Message from ${name}: ${text}`);
 
@@ -42,13 +44,14 @@ app.post("/callback", async (req, res) => {
       return;
     }
 
-    // Load the current roll call from Redis
+    // Load the roll call from Redis
     let rollCall = await redis.get(ROLL_CALL_KEY);
 
     if (!rollCall) {
       rollCall = {
         active: false,
         dateTime: "",
+        groupId: "",
         responses: {}
       };
     }
@@ -69,17 +72,17 @@ app.post("/callback", async (req, res) => {
       rollCall = {
         active: true,
         dateTime: dateTime,
+        groupId: groupId,
         responses: {}
       };
 
-      // Save the roll call to Redis
       await redis.set(ROLL_CALL_KEY, rollCall);
 
       await sendMessage(
         `🥎 ROLL CALL OPEN\n\n` +
         `📅 ${dateTime}\n\n` +
         `Are you playing?\n\n` +
-        `Reply:\n` +
+        `Reply with:\n` +
         `🟢 IN — I'm playing\n` +
         `🔴 OUT — Can't make it\n` +
         `🟡 MAYBE — Not sure yet\n\n` +
@@ -98,13 +101,14 @@ app.post("/callback", async (req, res) => {
     // CLOSE ROLL CALL
     if (text.toLowerCase() === "!close") {
       if (!rollCall.active) {
-        await sendMessage("⚠️ There is no active roll call.");
+        await sendMessage(
+          "⚠️ There is no active roll call."
+        );
         return;
       }
 
       rollCall.active = false;
 
-      // Save the closed roll call
       await redis.set(ROLL_CALL_KEY, rollCall);
 
       await sendAttendance(
@@ -117,29 +121,99 @@ app.post("/callback", async (req, res) => {
 
     // ATTENDANCE RESPONSES
     if (rollCall.active) {
-      const response = text.toLowerCase();
+      // Normalize the message so different apostrophes work
+      // Example: I'm in / I’m in
+      const response = text
+        .toLowerCase()
+        .trim()
+        .replace(/[’‘]/g, "'");
 
+      let attendanceResponse = null;
+
+      // --------------------------------
+      // IN RESPONSES
+      // --------------------------------
       if (
         response === "in" ||
-        response === "out" ||
-        response === "maybe"
+        response === "i'm in" ||
+        response === "im in" ||
+        response === "i am in" ||
+        response === "i'm playing" ||
+        response === "im playing" ||
+        response === "i am playing" ||
+        response === "i'll play" ||
+        response === "ill play" ||
+        response === "i will play" ||
+        response === "i'll be there" ||
+        response === "ill be there" ||
+        response === "i will be there" ||
+        response === "yes" ||
+        response === "yes i'm playing" ||
+        response === "yes im playing" ||
+        response === "yes i am playing"
       ) {
-        // Use GroupMe user ID when available
+        attendanceResponse = "in";
+      }
+
+      // --------------------------------
+      // OUT RESPONSES
+      // --------------------------------
+      else if (
+        response === "out" ||
+        response === "i'm out" ||
+        response === "im out" ||
+        response === "i am out" ||
+        response === "i'm not playing" ||
+        response === "im not playing" ||
+        response === "i am not playing" ||
+        response === "i can't make it" ||
+        response === "i cant make it" ||
+        response === "i cannot make it" ||
+        response === "i won't be there" ||
+        response === "i wont be there" ||
+        response === "i will not be there" ||
+        response === "no" ||
+        response === "no i can't" ||
+        response === "no i cant"
+      ) {
+        attendanceResponse = "out";
+      }
+
+      // --------------------------------
+      // MAYBE RESPONSES
+      // --------------------------------
+      else if (
+        response === "maybe" ||
+        response === "i'm not sure" ||
+        response === "im not sure" ||
+        response === "i am not sure" ||
+        response === "not sure" ||
+        response === "i might be there" ||
+        response === "i might play" ||
+        response === "i may be there" ||
+        response === "i may play"
+      ) {
+        attendanceResponse = "maybe";
+      }
+
+      // --------------------------------
+      // SAVE RESPONSE
+      // --------------------------------
+      if (attendanceResponse) {
         const userId = message.user_id || name;
 
         rollCall.responses[userId] = {
           name: name,
-          response: response
+          response: attendanceResponse
         };
 
-        // Save the updated response
         await redis.set(ROLL_CALL_KEY, rollCall);
 
         let confirmation;
 
-        if (response === "in") {
+        if (attendanceResponse === "in") {
           confirmation = `🟢 ${name} is IN!`;
-        } else if (response === "out") {
+        } else if (attendanceResponse === "out") {
           confirmation = `🔴 ${name} is OUT.`;
         } else {
           confirmation = `🟡 ${name} is MAYBE.`;
@@ -152,31 +226,112 @@ app.post("/callback", async (req, res) => {
     }
 
   } catch (error) {
-    console.error("Error processing GroupMe message:", error);
+    console.error(
+      "Error processing GroupMe message:",
+      error
+    );
   }
 });
 
+// ----------------------------------------
+// GET CURRENT GROUP MEMBERS
+// ----------------------------------------
+async function getGroupMembers(groupId) {
+  try {
+    if (!groupId) {
+      console.error("No GroupMe group ID available.");
+      return [];
+    }
+
+    const response = await fetch(
+      `https://api.groupme.com/v3/groups/${groupId}`,
+      {
+        method: "GET",
+        headers: {
+          "X-Access-Token": process.env.GROUPME_ACCESS_TOKEN,
+          "Accept": "application/json"
+        }
+      }
+    );
+
+    const data = await response.json();
+
+    console.log(
+      "Group members request:",
+      response.status
+    );
+
+    if (!response.ok) {
+      console.error(
+        "GroupMe members API error:",
+        data
+      );
+
+      return [];
+    }
+
+    return data.response?.members || [];
+
+  } catch (error) {
+    console.error(
+      "Error getting GroupMe group members:",
+      error
+    );
+
+    return [];
+  }
+}
+
+// ----------------------------------------
 // SEND ATTENDANCE REPORT
+// ----------------------------------------
 async function sendAttendance(
   rollCall,
   header = "📋 CURRENT ATTENDANCE"
 ) {
   if (!rollCall.dateTime) {
-    await sendMessage("⚠️ There is no active roll call.");
+    await sendMessage(
+      "⚠️ There is no active roll call."
+    );
+    return;
+  }
+
+  // Get the CURRENT members of the GroupMe group
+  const members = await getGroupMembers(
+    rollCall.groupId
+  );
+
+  if (members.length === 0) {
+    await sendMessage(
+      "⚠️ I couldn't retrieve the current GroupMe members."
+    );
     return;
   }
 
   const inList = [];
   const outList = [];
   const maybeList = [];
+  const noResponseList = [];
 
-  for (const person of Object.values(rollCall.responses || {})) {
-    if (person.response === "in") {
-      inList.push(person.name);
-    } else if (person.response === "out") {
-      outList.push(person.name);
-    } else if (person.response === "maybe") {
-      maybeList.push(person.name);
+  // Create a lookup of people who responded
+  const responses = rollCall.responses || {};
+
+  // Compare every current GroupMe member
+  // against the responses
+  for (const member of members) {
+    const userId = member.user_id;
+    const memberName = member.nickname || "Unknown";
+
+    const response = responses[userId];
+
+    if (!response) {
+      noResponseList.push(memberName);
+    } else if (response.response === "in") {
+      inList.push(response.name || memberName);
+    } else if (response.response === "out") {
+      outList.push(response.name || memberName);
+    } else if (response.response === "maybe") {
+      maybeList.push(response.name || memberName);
     }
   }
 
@@ -193,17 +348,25 @@ async function sendAttendance(
   const message =
     `${header}\n\n` +
     `📅 ${rollCall.dateTime}\n\n` +
+
     `🟢 IN (${inList.length})\n` +
     `${formatList(inList)}\n\n` +
+
     `🔴 OUT (${outList.length})\n` +
     `${formatList(outList)}\n\n` +
+
     `🟡 MAYBE (${maybeList.length})\n` +
-    `${formatList(maybeList)}`;
+    `${formatList(maybeList)}\n\n` +
+
+    `⚪ NO RESPONSE (${noResponseList.length})\n` +
+    `${formatList(noResponseList)}`;
 
   await sendMessage(message);
 }
 
-// SEND MESSAGE TO GROUPME
+// ----------------------------------------
+// SEND MESSAGE TO PRODUCTION GROUPME BOT
+// ----------------------------------------
 async function sendMessage(text) {
   try {
     const response = await fetch(
@@ -223,7 +386,7 @@ async function sendMessage(text) {
     const result = await response.text();
 
     console.log(
-      "Bot ID being used:",
+      "Production Bot ID being used:",
       process.env.GROUPME_BOT_ID
     );
 
@@ -235,12 +398,12 @@ async function sendMessage(text) {
 
   } catch (error) {
     console.error(
-      "Error sending GroupMe message:",
+      "Error sending production GroupMe message:",
       error
     );
   }
 }
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Production server running on port ${PORT}`);
 });
