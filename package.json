@@ -1,12 +1,15 @@
+```json
 {
   "name": "groupme-rollcall-bot",
   "version": "1.0.0",
-  "description": "GroupMe roll call bot",
+  "description": "GroupMe Roll Call Bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "@upstash/redis": "^1.35.3"
   }
 }
+```
