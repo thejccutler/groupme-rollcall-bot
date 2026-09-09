@@ -1,16 +1,19 @@
 const express = require("express");
+const { Redis } = require("@upstash/redis");
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Current roll call
-let rollCall = {
-  active: false,
-  dateTime: "",
-  responses: {}
-};
+// Connect to Upstash Redis
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN
+});
+
+// Redis key where we store the active roll call
+const ROLL_CALL_KEY = "groupme:rollcall";
 
 // Home page
 app.get("/", (req, res) => {
@@ -22,119 +25,129 @@ app.post("/callback", async (req, res) => {
   // Tell GroupMe we received the message
   res.sendStatus(200);
 
-  const message = req.body;
+  try {
+    const message = req.body;
 
-  if (!message || !message.text) {
-    return;
-  }
-
-  const text = message.text.trim();
-  const name = message.name || "Unknown";
-
-  console.log(`Message from ${name}: ${text}`);
-
-  // Ignore messages sent by the bot itself
-  if (message.sender_type === "bot") {
-    return;
-  }
-
-  // ==============================
-  // START ROLL CALL
-  // ==============================
-
-  if (text.toLowerCase().startsWith("!rollcall")) {
-    const dateTime = text.substring(9).trim();
-
-    if (!dateTime) {
-      await sendMessage(
-        "⚠️ Please specify a date and time.\n\n" +
-        "Example:\n" +
-        "!rollcall September 15 at 7:00 PM"
-      );
+    if (!message || !message.text) {
       return;
     }
 
-    rollCall = {
-      active: true,
-      dateTime: dateTime,
-      responses: {}
-    };
+    const text = message.text.trim();
+    const name = message.name || "Unknown";
 
-    await sendMessage(
-      `🥎 ROLL CALL OPEN\n\n` +
-      `📅 ${dateTime}\n\n` +
-      `Are you playing?\n\n` +
-      `Reply:\n` +
-      `🟢 IN — I'm playing\n` +
-      `🔴 OUT — Can't make it\n` +
-      `🟡 MAYBE — Not sure yet\n\n` +
-      `Use !attendance to see the current responses.`
-    );
+    console.log(`Message from ${name}: ${text}`);
 
-    return;
-  }
+    // Ignore messages sent by the bot itself
+    if (message.sender_type === "bot") {
+      return;
+    }
 
-  // ==============================
-  // ATTENDANCE RESPONSES
-  // ==============================
+    // Load the current roll call from Redis
+    let rollCall = await redis.get(ROLL_CALL_KEY);
 
-  if (rollCall.active) {
-    const response = text.toLowerCase();
+    if (!rollCall) {
+      rollCall = {
+        active: false,
+        dateTime: "",
+        responses: {}
+      };
+    }
 
-    if (
-      response === "in" ||
-      response === "out" ||
-      response === "maybe"
-    ) {
-      rollCall.responses[name] = response;
+    // START ROLL CALL
+    if (text.toLowerCase().startsWith("!rollcall")) {
+      const dateTime = text.substring(9).trim();
 
-      let confirmation;
-
-      if (response === "in") {
-        confirmation = `🟢 ${name} is IN!`;
-      } else if (response === "out") {
-        confirmation = `🔴 ${name} is OUT.`;
-      } else {
-        confirmation = `🟡 ${name} is MAYBE.`;
+      if (!dateTime) {
+        await sendMessage(
+          "⚠️ Please specify a date and time.\n\n" +
+          "Example:\n" +
+          "!rollcall September 15 at 7:00 PM"
+        );
+        return;
       }
 
-      await sendMessage(confirmation);
+      rollCall = {
+        active: true,
+        dateTime: dateTime,
+        responses: {}
+      };
+
+      // Save the new roll call
+      await redis.set(ROLL_CALL_KEY, rollCall);
+
+      await sendMessage(
+        `🥎 ROLL CALL OPEN\n\n` +
+        `📅 ${dateTime}\n\n` +
+        `Are you playing?\n\n` +
+        `Reply:\n` +
+        `🟢 IN — I'm playing\n` +
+        `🔴 OUT — Can't make it\n` +
+        `🟡 MAYBE — Not sure yet\n\n` +
+        `Use !attendance to see the current responses.`
+      );
+
       return;
     }
-  }
 
-  // ==============================
-  // SHOW ATTENDANCE
-  // ==============================
-
-  if (text.toLowerCase() === "!attendance") {
-    await sendAttendance();
-    return;
-  }
-
-  // ==============================
-  // CLOSE ROLL CALL
-  // ==============================
-
-  if (text.toLowerCase() === "!close") {
-    if (!rollCall.active) {
-      await sendMessage("⚠️ There is no active roll call.");
+    // SHOW ATTENDANCE
+    if (text.toLowerCase() === "!attendance") {
+      await sendAttendance(rollCall);
       return;
     }
 
-    rollCall.active = false;
+    // CLOSE ROLL CALL
+    if (text.toLowerCase() === "!close") {
+      if (!rollCall.active) {
+        await sendMessage("⚠️ There is no active roll call.");
+        return;
+      }
 
-    await sendAttendance("🔒 ROLL CALL CLOSED");
+      rollCall.active = false;
 
-    return;
+      // Save the closed roll call
+      await redis.set(ROLL_CALL_KEY, rollCall);
+
+      await sendAttendance(rollCall, "🔒 ROLL CALL CLOSED");
+
+      return;
+    }
+
+    // ATTENDANCE RESPONSES
+    if (rollCall.active) {
+      const response = text.toLowerCase();
+
+      if (
+        response === "in" ||
+        response === "out" ||
+        response === "maybe"
+      ) {
+        // Save/update this person's response
+        rollCall.responses[name] = response;
+
+        await redis.set(ROLL_CALL_KEY, rollCall);
+
+        let confirmation;
+
+        if (response === "in") {
+          confirmation = `🟢 ${name} is IN!`;
+        } else if (response === "out") {
+          confirmation = `🔴 ${name} is OUT.`;
+        } else {
+          confirmation = `🟡 ${name} is MAYBE.`;
+        }
+
+        await sendMessage(confirmation);
+        return;
+      }
+    }
+
+  } catch (error) {
+    console.error("Error processing GroupMe message:", error);
   }
 });
 
-// =====================================
 // SEND ATTENDANCE REPORT
-// =====================================
-
-async function sendAttendance(header = "📋 CURRENT ATTENDANCE") {
+async function sendAttendance(rollCall, header = "📋 CURRENT ATTENDANCE") {
   if (!rollCall.dateTime) {
     await sendMessage("⚠️ There is no active roll call.");
     return;
@@ -144,7 +157,7 @@ async function sendAttendance(header = "📋 CURRENT ATTENDANCE") {
   const outList = [];
   const maybeList = [];
 
-  for (const [name, response] of Object.entries(rollCall.responses)) {
+  for (const [name, response] of Object.entries(rollCall.responses || {})) {
     if (response === "in") {
       inList.push(name);
     } else if (response === "out") {
@@ -177,10 +190,7 @@ async function sendAttendance(header = "📋 CURRENT ATTENDANCE") {
   await sendMessage(message);
 }
 
-// =====================================
 // SEND MESSAGE TO GROUPME
-// =====================================
-
 async function sendMessage(text) {
   try {
     const response = await fetch(
@@ -206,10 +216,6 @@ async function sendMessage(text) {
     console.error("Error sending GroupMe message:", error);
   }
 }
-
-// =====================================
-// START SERVER
-// =====================================
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
