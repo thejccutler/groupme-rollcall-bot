@@ -6,35 +6,19 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+// Connect to Upstash Redis
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN
 });
 
+// Redis key for the softball group's roll call
+const ROLL_CALL_KEY = "groupme:rollcall";
+
 // Home page
 app.get("/", (req, res) => {
   res.send("GroupMe Roll Call Bot is running!");
 });
-
-// Get the correct bot ID for the incoming GroupMe message
-function getBotIdForGroup(message) {
-  const mainBotId = process.env.GROUPME_BOT_ID;
-  const testBotId = process.env.GROUPME_TEST_BOT_ID;
-
-  // GroupMe callback messages include the bot_id when appropriate.
-  // If it matches one of our bots, use that bot.
-  if (message.bot_id === testBotId) {
-    return testBotId;
-  }
-
-  return mainBotId;
-}
-
-// Create a unique Redis key for each GroupMe group
-function getRollCallKey(message) {
-  const groupId = message.group_id || "unknown";
-  return `groupme:rollcall:${groupId}`;
-}
 
 // GroupMe callback
 app.post("/callback", async (req, res) => {
@@ -50,21 +34,16 @@ app.post("/callback", async (req, res) => {
 
     const text = message.text.trim();
     const name = message.name || "Unknown";
-    const groupId = message.group_id || "unknown";
 
     console.log(`Message from ${name}: ${text}`);
-    console.log(`Group ID: ${groupId}`);
-    console.log(`Bot ID in message: ${message.bot_id || "none"}`);
 
     // Ignore messages sent by bots
     if (message.sender_type === "bot") {
       return;
     }
 
-    const rollCallKey = getRollCallKey(message);
-
-    // Load this group's roll call from Redis
-    let rollCall = await redis.get(rollCallKey);
+    // Load the current roll call from Redis
+    let rollCall = await redis.get(ROLL_CALL_KEY);
 
     if (!rollCall) {
       rollCall = {
@@ -80,7 +59,6 @@ app.post("/callback", async (req, res) => {
 
       if (!dateTime) {
         await sendMessage(
-          getBotIdForGroup(message),
           "⚠️ Please specify a date and time.\n\n" +
           "Example:\n" +
           "!rollcall September 15 at 7:00 PM"
@@ -94,10 +72,10 @@ app.post("/callback", async (req, res) => {
         responses: {}
       };
 
-      await redis.set(rollCallKey, rollCall);
+      // Save the roll call to Redis
+      await redis.set(ROLL_CALL_KEY, rollCall);
 
       await sendMessage(
-        getBotIdForGroup(message),
         `🥎 ROLL CALL OPEN\n\n` +
         `📅 ${dateTime}\n\n` +
         `Are you playing?\n\n` +
@@ -113,30 +91,24 @@ app.post("/callback", async (req, res) => {
 
     // SHOW ATTENDANCE
     if (text.toLowerCase() === "!attendance") {
-      await sendAttendance(
-        rollCall,
-        getBotIdForGroup(message)
-      );
+      await sendAttendance(rollCall);
       return;
     }
 
     // CLOSE ROLL CALL
     if (text.toLowerCase() === "!close") {
       if (!rollCall.active) {
-        await sendMessage(
-          getBotIdForGroup(message),
-          "⚠️ There is no active roll call."
-        );
+        await sendMessage("⚠️ There is no active roll call.");
         return;
       }
 
       rollCall.active = false;
 
-      await redis.set(rollCallKey, rollCall);
+      // Save the closed roll call
+      await redis.set(ROLL_CALL_KEY, rollCall);
 
       await sendAttendance(
         rollCall,
-        getBotIdForGroup(message),
         "🔒 ROLL CALL CLOSED"
       );
 
@@ -152,8 +124,7 @@ app.post("/callback", async (req, res) => {
         response === "out" ||
         response === "maybe"
       ) {
-        // Use GroupMe's user ID so the same person can't
-        // accidentally appear twice if they change their name.
+        // Use GroupMe user ID when available
         const userId = message.user_id || name;
 
         rollCall.responses[userId] = {
@@ -161,7 +132,8 @@ app.post("/callback", async (req, res) => {
           response: response
         };
 
-        await redis.set(rollCallKey, rollCall);
+        // Save the updated response
+        await redis.set(ROLL_CALL_KEY, rollCall);
 
         let confirmation;
 
@@ -173,10 +145,7 @@ app.post("/callback", async (req, res) => {
           confirmation = `🟡 ${name} is MAYBE.`;
         }
 
-        await sendMessage(
-          getBotIdForGroup(message),
-          confirmation
-        );
+        await sendMessage(confirmation);
 
         return;
       }
@@ -190,14 +159,10 @@ app.post("/callback", async (req, res) => {
 // SEND ATTENDANCE REPORT
 async function sendAttendance(
   rollCall,
-  botId,
   header = "📋 CURRENT ATTENDANCE"
 ) {
   if (!rollCall.dateTime) {
-    await sendMessage(
-      botId,
-      "⚠️ There is no active roll call."
-    );
+    await sendMessage("⚠️ There is no active roll call.");
     return;
   }
 
@@ -235,11 +200,11 @@ async function sendAttendance(
     `🟡 MAYBE (${maybeList.length})\n` +
     `${formatList(maybeList)}`;
 
-  await sendMessage(botId, message);
+  await sendMessage(message);
 }
 
 // SEND MESSAGE TO GROUPME
-async function sendMessage(botId, text) {
+async function sendMessage(text) {
   try {
     const response = await fetch(
       "https://api.groupme.com/v3/bots/post",
@@ -249,7 +214,7 @@ async function sendMessage(botId, text) {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          bot_id: botId,
+          bot_id: process.env.GROUPME_BOT_ID,
           text: text
         })
       }
@@ -259,7 +224,7 @@ async function sendMessage(botId, text) {
 
     console.log(
       "Bot ID being used:",
-      botId
+      process.env.GROUPME_BOT_ID
     );
 
     console.log(
